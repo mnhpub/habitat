@@ -1,6 +1,7 @@
 import {
   LIFECYCLE,
   type Actor,
+  type Breakout,
   type Command,
   type CommandType,
   type EventState,
@@ -9,6 +10,14 @@ import {
 } from './types';
 import { CommandError, parseCommand } from './command';
 import { chatScope } from './chat';
+import {
+  CREW_ROLES,
+  MAX_BREAKOUT_MESSAGES,
+  MAX_BREAKOUTS,
+  canReadBreakoutRoom,
+  currentBreakout,
+  isMember,
+} from './breakout';
 export { CommandError } from './command';
 
 const ANY = 'any' as const;
@@ -83,6 +92,13 @@ export const PERMISSIONS: Record<CommandType, Allowed> = {
   LEAVE_TABLE: ANY,
   BRIDGE_MIC: ['producer', 'audio', 'stage_manager', 'moderator', 'talent', 'foh', 'vendor'],
   BRIDGE_LOG: ['producer', 'audio', 'stage_manager', 'moderator', 'talent', 'foh', 'vendor'],
+
+  CREATE_BREAKOUT: CREW_ROLES,
+  JOIN_BREAKOUT: CREW_ROLES,
+  LEAVE_BREAKOUT: CREW_ROLES,
+  END_BREAKOUT: CREW_ROLES,
+  BREAKOUT_CHAT: CREW_ROLES,
+  SET_BREAKOUT_NOTES: CREW_ROLES,
 };
 
 /** Commands that act on the live production. Production roles must be on WARP to send them. */
@@ -495,6 +511,55 @@ export function apply(s: EventState, cmd: Command, actor: Actor, now: number): s
       s.bridgeLog.unshift({ ts: now, who: actor.name, text: t });
       if (s.bridgeLog.length > 100) s.bridgeLog.length = 100;
       return `Bridge: ${t}`;
+    }
+    // ---------------------------------------------------------------- small-team breakouts
+    case 'CREATE_BREAKOUT': {
+      if (s.breakouts.length >= MAX_BREAKOUTS) throw new CommandError('This event has reached its breakout limit', 409);
+      const b: Breakout = {
+        id: newId('bo', now), name: text(cmd.name, 80, 'Breakout name'), topic: cmd.topic ? text(cmd.topic, 200, 'Topic') : '',
+        capacity: cmd.capacity, status: 'open', createdBy: actor.email, createdAt: now, members: [], messages: [],
+      };
+      s.breakouts.unshift(b);
+      return `Breakout created: ${b.name}`;
+    }
+    case 'JOIN_BREAKOUT': {
+      const b = find(s.breakouts, cmd.breakoutId, 'breakout');
+      if (b.status !== 'open') throw new CommandError('That breakout has ended');
+      if (!isMember(b, actor.email)) {
+        if (b.members.length >= b.capacity) throw new CommandError('That breakout is full');
+        // One breakout at a time: joining one leaves the other.
+        for (const o of s.breakouts) o.members = o.members.filter((m) => m.email !== actor.email);
+        b.members.push({ email: actor.email, name: actor.name, joinedAt: now });
+      }
+      return `${actor.name} joined ${b.name}`;
+    }
+    case 'LEAVE_BREAKOUT': {
+      const current = currentBreakout(s.breakouts, actor.email);
+      if (!current) throw new CommandError("You're not in a breakout");
+      current.members = current.members.filter((m) => m.email !== actor.email);
+      return `${actor.name} left ${current.name}`;
+    }
+    case 'END_BREAKOUT': {
+      const b = find(s.breakouts, cmd.breakoutId, 'breakout');
+      if (b.status === 'ended') throw new CommandError('That breakout has already ended');
+      b.status = 'ended';
+      b.endedAt = now;
+      b.members = [];
+      return `Breakout ended: ${b.name}`;
+    }
+    case 'BREAKOUT_CHAT': {
+      const t = text(cmd.text, 500, 'Message');
+      const b = currentBreakout(s.breakouts, actor.email);
+      if (!b) throw new CommandError('Join a breakout before chatting', 403);
+      b.messages.push({ id: newId('bm', now), author: actor.email, authorName: actor.name, text: t, ts: now });
+      if (b.messages.length > MAX_BREAKOUT_MESSAGES) b.messages.splice(0, b.messages.length - MAX_BREAKOUT_MESSAGES);
+      return 'breakout chat';
+    }
+    case 'SET_BREAKOUT_NOTES': {
+      const b = find(s.breakouts, cmd.breakoutId, 'breakout');
+      if (!canReadBreakoutRoom(b, actor)) throw new CommandError('Only breakout members or hosts can save notes', 403);
+      b.notes = { text: text(cmd.text, 8000, 'Notes'), generatedAt: now, by: actor.email };
+      return `Notes saved: ${b.name}`;
     }
     default: {
       const never: never = cmd;

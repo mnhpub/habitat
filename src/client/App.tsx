@@ -7,6 +7,7 @@ import * as Production from './pages/production';
 import * as Backstage from './pages/backstage';
 import * as Audience from './pages/audience';
 import * as Ops from './pages/ops';
+import * as Breakouts from './pages/breakouts';
 
 interface Me { identity: { email: string; name: string; warp: boolean; device: string; source: 'access' | 'dev' }; devAuth: boolean; requireWarp: boolean }
 
@@ -205,6 +206,7 @@ export const SCREENS: { group: string; items: Screen[] }[] = [
     { path: 'clock', title: 'Event clock & devices', roles: CREW, el: () => <Production.EventClock /> },
     { path: 'bus', title: 'Stream bus', roles: ['producer', 'audio'], el: () => <Production.StreamBus /> },
     { path: 'bridge', title: 'Bridge', roles: CREW, el: () => <Production.Bridge /> },
+    { path: 'breakouts', title: 'Breakouts', roles: CREW, el: () => <Breakouts.Breakouts /> },
   ] },
   { group: 'Talent & backstage', items: [
     { path: 'green-room', title: 'Green room', roles: ['talent', 'stage_manager', 'producer'], el: () => <Backstage.GreenRoom /> },

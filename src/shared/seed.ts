@@ -183,6 +183,7 @@ export function seedEvent(id: string, name: string, kind: 'corporate' | 'social'
       { ts: epoch + 57 * MIN, who: 'Catering', text: 'Break service 1:45, 6 carts' },
     ],
     bridgeMics: {},
+    breakouts: [],
     recent: [],
   };
 }

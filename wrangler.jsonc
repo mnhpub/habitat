@@ -12,6 +12,9 @@
     "run_worker_first": ["/api/*"]
   },
 
+  // Workers AI, used to translate chat messages.
+  "ai": { "binding": "AI" },
+
   // One EventRoom Durable Object per event: the authoritative event clock, state and journal.
   "durable_objects": {
     "bindings": [{ "name": "EVENTS", "class_name": "EventRoom" }]

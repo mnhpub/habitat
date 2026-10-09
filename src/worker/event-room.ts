@@ -6,8 +6,9 @@ import { resolveActor } from './membership';
 import { MAX_SNAPSHOT_BYTES, snapshotChunks, writeSnapshot } from './snapshot-storage';
 import { seedEvent } from '../shared/seed';
 import { viewFor } from '../shared/view';
+import { canReadBreakoutRoom } from '../shared/breakout';
 import type {
-  Actor, ClientSnapshot, Command, CommandResult, EventState, JournalEntry, PresenceEntry, Role,
+  Actor, Breakout, ClientSnapshot, Command, CommandResult, EventState, JournalEntry, PresenceEntry, Role,
 } from '../shared/types';
 
 interface SocketMeta { actor: Actor; since: number; revoked?: boolean; expiresAt?: number; roleVersion?: number }
@@ -16,7 +17,7 @@ interface SocketMeta { actor: Actor; since: number; revoked?: boolean; expiresAt
 const QUIET = /^(react:|vote:|word:|upvote:|chat$|bridge-mic:)/;
 const GROWING_COMMANDS = new Set<Command['type']>([
   'REGISTER', 'ASK', 'UPVOTE', 'ORDER', 'POLL_CREATE', 'VOTE', 'WORD', 'RAISE_HAND',
-  'JOIN_TABLE', 'CHAT', 'BRIDGE_LOG', 'BRIDGE_MIC', 'ADD_INCIDENT',
+  'JOIN_TABLE', 'CHAT', 'BRIDGE_LOG', 'BRIDGE_MIC', 'ADD_INCIDENT', 'BREAKOUT_CHAT', 'CREATE_BREAKOUT',
 ]);
 
 /**
@@ -74,6 +75,14 @@ export class EventRoom extends DurableObject<Env> {
 
   async snapshot(actor: Actor): Promise<ClientSnapshot> {
     return this.snapshotFor(this.require(), actor);
+  }
+
+  /** Full breakout, including its transcript, for members and hosts. Used to write notes. */
+  async breakoutRoom(actor: Actor, breakoutId: string): Promise<{ ok: true; breakout: Breakout } | { ok: false; error: string; status: number }> {
+    const b = this.require().breakouts.find((x) => x.id === breakoutId);
+    if (!b) return { ok: false, error: 'Unknown breakout', status: 404 };
+    if (!canReadBreakoutRoom(b, actor)) return { ok: false, error: "You can't read this breakout", status: 403 };
+    return { ok: true, breakout: structuredClone(b) };
   }
 
   async command(actor: Actor, input: unknown): Promise<CommandResult> {

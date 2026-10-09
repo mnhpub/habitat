@@ -5,6 +5,9 @@ import { ALL_ROLES, type Role } from '../shared/types';
 import { CommandError } from '../shared/command';
 import { resolveActor as actorFor } from './membership';
 import { readJson } from './request';
+import { generateBreakoutNotes, NotesUnavailable } from './notes';
+import { translateText } from './translate';
+import { isLanguageCode, TRANSLATION_MAX_CHARS } from '../shared/languages';
 
 export { EventRoom } from './event-room';
 
@@ -120,6 +123,47 @@ app.get('/api/events/:id/ws', async (c) => {
   headers.set('X-Actor', JSON.stringify(actor));
   headers.set('X-Session-Expires', String(Math.min(c.get('identity').expiresAt, Date.now() + 5 * 60_000)));
   return room(c.env, c.req.param('id')).fetch(new Request(c.req.raw.url, { headers }));
+});
+
+// ------------------------------------------------------------------ translation
+
+app.post('/api/events/:id/translate', async (c) => {
+  const actor = await actorFor(c.env, c.get('identity'), c.req.param('id'));
+  if (!actor) return c.json({ error: 'No access to this event' }, 403);
+  const body = await readJson(c.req.raw);
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (!text || text.length > TRANSLATION_MAX_CHARS) return c.json({ error: 'Text to translate is required (up to 500 characters)' }, 400);
+  if (!isLanguageCode(body.target)) return c.json({ error: 'Choose a supported language' }, 400);
+  if (body.source !== undefined && !isLanguageCode(body.source)) return c.json({ error: 'Choose a supported language' }, 400);
+  try {
+    const translated = await translateText(c.env, text, body.target, body.source as string | undefined);
+    return c.json({ text: translated, source: body.source ?? 'en', target: body.target });
+  } catch (err) {
+    console.error('Translation failed', err);
+    return c.json({ error: 'Translation is unavailable right now. Try again in a moment.' }, 502);
+  }
+});
+
+// ------------------------------------------------------------------ small-team breakouts
+
+app.post('/api/events/:id/breakouts/:bid/notes', async (c) => {
+  const eventId = c.req.param('id');
+  const actor = await actorFor(c.env, c.get('identity'), eventId);
+  if (!actor) return c.json({ error: 'No access to this event' }, 403);
+  const events = room(c.env, eventId);
+  const read = await events.breakoutRoom(actor, c.req.param('bid'));
+  if (!read.ok) return c.json({ error: read.error }, errorStatus(read.status));
+  if (!read.breakout.messages.length) return c.json({ error: 'Nothing has been said in this breakout yet' }, 400);
+  let text: string;
+  try {
+    text = await generateBreakoutNotes(c.env, read.breakout);
+  } catch (err) {
+    if (err instanceof NotesUnavailable) return c.json({ error: err.message }, 503);
+    console.error('Breakout notes failed', err);
+    return c.json({ error: 'Notes could not be generated. Try again in a moment.' }, 502);
+  }
+  const result = await events.command(actor, { type: 'SET_BREAKOUT_NOTES', breakoutId: read.breakout.id, text });
+  return c.json(result, result.ok ? 200 : errorStatus(result.status ?? 400));
 });
 
 // ------------------------------------------------------------------ team (organizers)

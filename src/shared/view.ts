@@ -1,5 +1,6 @@
 import type { Actor, EventState, EventView, PollView, QuestionView, Role } from './types';
 import { canReadChat } from './chat';
+import { canReadBreakoutRoom } from './breakout';
 
 const has = (a: Actor, ...roles: Role[]) => a.roles.includes('organizer') || roles.some((r) => a.roles.includes(r));
 
@@ -45,6 +46,11 @@ export function viewFor(s: EventState, a: Actor): EventView {
   const myGuest = s.guests.find((g) => g.email === a.email);
   const orders = ops ? s.orders : s.orders.filter((o) => o.guest === myGuest?.id || o.guest === a.email);
   const valet = ops ? s.valet : s.valet.filter((v) => v.guest === myGuest?.id);
+  // Breakouts are crew-only. Chat, transcript and notes go only to members and hosts.
+  const breakouts = crew ? s.breakouts.map((b) => {
+    const room = canReadBreakoutRoom(b, a);
+    return { ...b, messages: room ? b.messages : [], notes: room ? b.notes : undefined };
+  }) : [];
   const budget = has(a) ? s.budget : { authorizedCents: 0, committedCents: 0, settledCents: 0, stepUpLimitCents: 0 };
 
   return {
@@ -56,6 +62,7 @@ export function viewFor(s: EventState, a: Actor): EventView {
     orders,
     valet,
     budget,
+    breakouts,
     bridgeLog: crew ? s.bridgeLog : [],
     devices: crew ? s.devices : [],
     recent: crew ? s.recent : [],

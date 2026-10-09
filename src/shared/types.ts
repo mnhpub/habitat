@@ -195,6 +195,24 @@ export interface Incident { id: string; title: string; detail: string; owner: st
 
 export interface NetTable { id: string; name: string; capacity: number; seats: string[]; note: string }
 
+export interface BreakoutMessage { id: string; author: string; authorName: string; text: string; ts: number }
+
+/** An ad hoc small-team breakout. Its chat is the transcript; notes are generated from it. */
+export interface Breakout {
+  id: string;
+  name: string;
+  topic: string;
+  capacity: number;
+  status: 'open' | 'ended';
+  createdBy: string;
+  createdAt: number;
+  endedAt?: number;
+  members: { email: string; name: string; joinedAt: number }[];
+  /** Visible only to members and hosts (see canReadBreakoutRoom). */
+  messages: BreakoutMessage[];
+  notes?: { text: string; generatedAt: number; by: string };
+}
+
 export interface BridgeEntry { ts: number; who: string; text: string }
 
 export interface JournalEntry {
@@ -256,6 +274,7 @@ export interface EventState {
   budget: { authorizedCents: number; committedCents: number; settledCents: number; stepUpLimitCents: number };
 
   tables: NetTable[];
+  breakouts: Breakout[];
   bridgeLog: BridgeEntry[];
   /** email -> mic live on the bridge */
   bridgeMics: Record<string, boolean>;
@@ -327,7 +346,14 @@ export type Command =
   | { type: 'JOIN_TABLE'; tableId: string }
   | { type: 'LEAVE_TABLE' }
   | { type: 'BRIDGE_MIC'; on: boolean }
-  | { type: 'BRIDGE_LOG'; text: string };
+  | { type: 'BRIDGE_LOG'; text: string }
+  // small-team breakouts (crew only)
+  | { type: 'CREATE_BREAKOUT'; name: string; topic?: string; capacity: number }
+  | { type: 'JOIN_BREAKOUT'; breakoutId: string }
+  | { type: 'LEAVE_BREAKOUT' }
+  | { type: 'END_BREAKOUT'; breakoutId: string }
+  | { type: 'BREAKOUT_CHAT'; text: string }
+  | { type: 'SET_BREAKOUT_NOTES'; breakoutId: string; text: string };
 
 export type CommandType = Command['type'];
 

@@ -52,6 +52,9 @@ const fields = {
   SET_BUDGET: { authorizedCents: money, committedCents: money, settledCents: money, stepUpLimitCents: money },
   RENAME_EVENT: { name: str(120), venue: (v: unknown) => typeof v === 'string' && v.length <= 120 },
   JOIN_TABLE: { tableId: id }, LEAVE_TABLE: {}, BRIDGE_MIC: on, BRIDGE_LOG: { text: str(200) },
+  CREATE_BREAKOUT: { name: str(80), topic: optional(str(200)), capacity: num(2, 8, true) },
+  JOIN_BREAKOUT: { breakoutId: id }, LEAVE_BREAKOUT: {}, END_BREAKOUT: { breakoutId: id },
+  BREAKOUT_CHAT: { text: str(500) }, SET_BREAKOUT_NOTES: { breakoutId: id, text: str(8000) },
 } satisfies Record<CommandType, Record<string, Rule>>;
 
 /** Validate untrusted JSON and copy only the fields defined by the command contract. */

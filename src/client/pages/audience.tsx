@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useEvent, useTick } from '../store';
 import { clockTime, Empty, fmtTau, Icon, ICONS, money, Person } from '../lib';
 import { Monitor } from './production';
+import { ChatText, LanguagePicker, useTranslateTo } from '../translate';
 import type { ChatMessage, EventView, Guest, PollView } from '../../shared/types';
 
 const srcLabel = (s: EventView, id: string) => s.sources.find((x) => x.id === id)?.label ?? id;
@@ -80,15 +81,17 @@ export function ChatBox({ height = 280 }: { height?: number }) {
   const { snap, send } = useEvent();
   const [ch, setCh] = useState<ChatMessage['channel']>('everyone');
   const [text, setText] = useState('');
+  const [reading, setReading] = useTranslateTo();
   const msgs = snap.state.chat.filter((m) => m.channel === ch);
   const pinned = snap.state.chat.find((m) => m.pinned);
   return (
     <div className="stack">
       <div className="seg" role="tablist">{CHANNELS.map((c) => <button key={c.id} role="tab" aria-selected={ch === c.id} className={ch === c.id ? 'on' : ''} onClick={() => setCh(c.id)}>{c.name}</button>)}</div>
+      <LanguagePicker value={reading} onChange={setReading} />
       {pinned && <div className="panel accent" style={{ padding: 8 }}><span className="small accent">Pinned · {pinned.authorName}</span><span>{pinned.text}</span></div>}
       <div className="stack tight" style={{ maxHeight: height, overflowY: 'auto' }}>
         {msgs.filter((m) => !m.pinned).slice(-40).map((m) => (
-          <div key={m.id}><b>{m.authorName}</b> <span className="small muted">{m.where} · {clockTime(m.ts)}{m.held ? ' · held for review' : ''}</span><div style={{ color: 'var(--text-2)' }}>{m.text}</div></div>
+          <div key={m.id}><b>{m.authorName}</b> <span className="small muted">{m.where} · {clockTime(m.ts)}{m.held ? ' · held for review' : ''}</span><ChatText text={m.text} target={reading} /></div>
         ))}
         {!msgs.length && <Empty>Nothing here yet.</Empty>}
       </div>
