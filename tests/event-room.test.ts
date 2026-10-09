@@ -12,7 +12,7 @@ test('removing a member closes the socket and rejects subsequent commands', asyn
   await f.room.refreshRoles(organizer.email, []);
   assert.equal(ws.closed, true);
   ws.sent.length = 0;
-  await f.room.webSocketMessage(ws as never, JSON.stringify({ type: 'cmd', id: 'revoked', cmd: { type: 'REACT', reaction: 'love' } }));
+  await f.room.onMessage(ws as never, JSON.stringify({ type: 'cmd', id: 'revoked', cmd: { type: 'REACT', reaction: 'love' } }));
   assert.equal(ws.sent.some(m => m.type === 'ack' && m.result.ok), false);
 });
 
@@ -20,7 +20,7 @@ test('production socket commands cannot reuse cached WARP trust', async () => {
   const f = fixture();
   await f.room.init('ev', 'Original', 'corporate', organizer.email);
   const ws = f.socket(organizer);
-  await f.room.webSocketMessage(ws as never, JSON.stringify({ type: 'cmd', id: 'take', cmd: { type: 'TAKE' } }));
+  await f.room.onMessage(ws as never, JSON.stringify({ type: 'cmd', id: 'take', cmd: { type: 'TAKE' } }));
   assert.equal(ws.sent.find(m => m.type === 'ack')?.result.ok, false);
   assert.equal((await f.room.snapshot(organizer)).state.seq, 0);
 });
@@ -94,7 +94,7 @@ test('socket commands consult current membership even if the refresh notificatio
   await f.room.init('ev', 'Test', 'corporate', organizer.email);
   const ws = f.socket(organizer);
   f.members.delete(organizer.email);
-  await f.room.webSocketMessage(ws as never, JSON.stringify({ type: 'cmd', id: 'stale', cmd: { type: 'ASK', text: 'Stale member', anonymous: false } }));
+  await f.room.onMessage(ws as never, JSON.stringify({ type: 'cmd', id: 'stale', cmd: { type: 'ASK', text: 'Stale member', anonymous: false } }));
   assert.equal(ws.closed, true);
   assert.equal((await f.room.snapshot(organizer)).state.seq, 0);
 });
@@ -103,10 +103,10 @@ test('expired socket sessions cannot receive snapshots or apply commands', async
   const f = fixture();
   await f.room.init('ev', 'Test', 'corporate', organizer.email);
   const ws = f.socket(organizer);
-  const meta = ws.deserializeAttachment();
+  const meta = ws.state;
   meta.expiresAt = Date.now() - 1;
-  ws.serializeAttachment(meta);
-  await f.room.webSocketMessage(ws as never, JSON.stringify({ type: 'cmd', id: 'expired', cmd: { type: 'REACT', reaction: 'love' } }));
+  ws.setState(meta);
+  await f.room.onMessage(ws as never, JSON.stringify({ type: 'cmd', id: 'expired', cmd: { type: 'REACT', reaction: 'love' } }));
   assert.equal(ws.closed, true);
   assert.equal((await f.room.snapshot(organizer)).state.seq, 0);
 });
@@ -119,4 +119,13 @@ test('new submissions stop at capacity while production controls retain headroom
   assert.equal(rejected.status, 409);
   assert.equal((await f.room.command(organizer, { type: 'TAKE' })).ok, true);
   assert.equal((await f.room.snapshot(organizer)).state.seq, 1);
+});
+
+test('deleting an event disconnects its sockets and leaves no room state behind', async () => {
+  const f = fixture();
+  await f.room.init('ev', 'Test', 'corporate', organizer.email);
+  const ws = f.socket(organizer);
+  await f.room.destroy();
+  assert.equal(ws.closed, true);
+  await assert.rejects(f.room.snapshot(organizer), /not initialized/);
 });

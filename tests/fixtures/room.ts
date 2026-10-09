@@ -30,6 +30,7 @@ export function fixture() {
       },
       setAlarm: async (_at: number) => {},
       deleteAlarm: async () => {},
+      deleteAll: async () => { db.exec('DELETE FROM journal; DELETE FROM snapshot_chunks; DELETE FROM snapshot; DELETE FROM metadata_outbox'); },
     },
   };
   const env = {
@@ -50,6 +51,8 @@ export function fixture() {
     },
   };
   const room = new EventRoom(ctx as never, env as never);
+  // PartyServer enumerates only sockets it accepted itself; the test sockets stand in for those.
+  (room as unknown as { getConnections: () => unknown[] }).getConnections = () => sockets;
   return {
     room, db, sockets, members,
     setFailSnapshot: (fail: boolean) => { failSnapshot = fail; },
@@ -59,15 +62,16 @@ export function fixture() {
   };
 }
 
+/** A connection with the same surface PartyServer gives the room: per-socket state plus send and close. */
 function socket(actor: Actor) {
-  let attachment = { actor, since: Date.now(), expiresAt: Date.now() + 60_000 };
+  let state: { actor: Actor; since: number; expiresAt: number; roleVersion?: number; revoked?: boolean } = { actor, since: Date.now(), expiresAt: Date.now() + 60_000 };
   const sent: Record<string, any>[] = [];
   let closed = false;
   return {
     sent,
     get closed() { return closed; },
-    deserializeAttachment: () => structuredClone(attachment),
-    serializeAttachment: (next: typeof attachment) => { attachment = structuredClone(next); },
+    get state() { return structuredClone(state); },
+    setState: (next: typeof state) => { state = structuredClone(next); },
     send: (json: string) => { sent.push(JSON.parse(json)); },
     close: (_code?: number) => { closed = true; },
   };

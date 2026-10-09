@@ -76,7 +76,7 @@ export class EventStore {
 
   private connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${location.host}/api/events/${this.eventId}/ws`);
+    const ws = new WebSocket(`${proto}//${location.host}/parties/events/${this.eventId}`);
     this.ws = ws;
     this.conn = this.snap ? 'offline' : 'connecting';
     this.emit();
@@ -111,6 +111,14 @@ export class EventStore {
     ws.onclose = (ev) => {
       if (this.closed || this.ws !== ws) return;
       if (this.pingTimer) clearInterval(this.pingTimer);
+      // The organizer deleted this event: stop reconnecting to a room that no longer exists.
+      if (ev.code === 4404) {
+        this.error = 'This event was deleted';
+        this.closed = true;
+        this.conn = 'offline';
+        this.emit();
+        return;
+      }
       this.clearPending('Connection lost');
       this.conn = 'offline';
       if (ev.code === 1008 || ev.code === 4403) this.error = 'No access to this event';

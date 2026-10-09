@@ -1,4 +1,4 @@
-import { DurableObject } from 'cloudflare:workers';
+import { Server, type Connection, type ConnectionContext, type WSMessage } from 'partyserver';
 import type { Env } from './env';
 import { apply, authorize, CommandError, fireNextCue, WARP_COMMANDS } from '../shared/reducer';
 import { parseCommand } from '../shared/command';
@@ -25,7 +25,9 @@ const GROWING_COMMANDS = new Set<Command['type']>([
  * the authoritative state, and the append-only journal. Every client holds a hibernating
  * WebSocket here and receives its own projection of the state after each change.
  */
-export class EventRoom extends DurableObject<Env> {
+export class EventRoom extends Server<Env> {
+  /** Sockets sleep between messages (Durable Object hibernation). Socket state lives in the socket attachment. */
+  static options = { hibernate: true };
   private state: EventState | null = null;
   private broadcastTimer: ReturnType<typeof setTimeout> | null = null;
   private metadataFlush: Promise<void> | null = null;
@@ -115,44 +117,55 @@ export class EventRoom extends DurableObject<Env> {
     return rows.toArray().map((r) => ({ seq: r.seq, ts: r.ts, tau: r.tau, actor: r.actor, type: r.type, summary: r.summary }));
   }
 
+  /**
+   * The event was deleted. The Worker has already removed its membership rows in D1, so nobody can
+   * reach the room any more; disconnect whoever is still attached and erase the room's storage.
+   */
+  async destroy(): Promise<void> {
+    if (this.broadcastTimer) clearTimeout(this.broadcastTimer);
+    this.broadcastTimer = null;
+    for (const ws of this.getConnections()) ws.close(4404, 'Event deleted');
+    this.state = null;
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+  }
+
   /** Membership changed in D1: update connected sockets for that person. */
   async refreshRoles(email: string, roles: Role[]): Promise<void> {
     const s = this.state;
-    for (const ws of this.ctx.getWebSockets()) {
-      const meta = ws.deserializeAttachment() as SocketMeta | null;
-      if (!meta || meta.actor.email !== email) continue;
-      meta.roleVersion = (meta.roleVersion ?? 0) + 1;
-      meta.actor.roles = roles;
-      meta.revoked = roles.length === 0;
-      ws.serializeAttachment(meta);
+    for (const ws of this.getConnections<SocketMeta>()) {
+      const current = ws.state as SocketMeta | null;
+      if (!current || current.actor.email !== email) continue;
+      // Socket state is read-only here: replace it rather than edit it in place.
+      const meta: SocketMeta = {
+        ...current,
+        actor: { ...current.actor, roles: [...roles] },
+        roleVersion: (current.roleVersion ?? 0) + 1,
+        revoked: roles.length === 0,
+      };
+      ws.setState(meta);
       if (meta.revoked) { ws.close(1008, 'Membership removed'); continue; }
-      if (s) this.send(ws, { type: 'snapshot', ...this.snapshotFor(s, meta.actor) });
+      if (s) this.deliver(ws, { type: 'snapshot', ...this.snapshotFor(s, meta.actor) });
     }
   }
 
-  // ------------------------------------------------------------------ WebSockets
+  // ------------------------------------------------------------------ WebSockets (PartyServer lifecycle)
 
-  async fetch(req: Request): Promise<Response> {
-    if (req.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
-    const raw = req.headers.get('X-Actor');
-    if (!raw) return new Response('Missing actor', { status: 400 });
+  /** The Worker has checked Access and event membership before routing here; the socket lease is set now. */
+  async onConnect(ws: Connection<SocketMeta>, ctx: ConnectionContext): Promise<void> {
+    const raw = ctx.request.headers.get('X-Actor');
+    if (!raw) { ws.close(1008, 'Missing actor'); return; }
     const actor = JSON.parse(raw) as Actor;
-    const s = this.require();
-    const expiresAt = Number(req.headers.get('X-Session-Expires'));
-    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return new Response('Session expired', { status: 401 });
-
-    const pair = new WebSocketPair();
-    const [client, server] = [pair[0], pair[1]];
-    this.ctx.acceptWebSocket(server, [actor.email]);
-    server.serializeAttachment({ actor, since: Date.now(), expiresAt } satisfies SocketMeta);
-    this.send(server, { type: 'snapshot', ...this.snapshotFor(s, actor) });
+    const expiresAt = Number(ctx.request.headers.get('X-Session-Expires'));
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) { ws.close(4401, 'Session expired'); return; }
+    ws.setState({ actor, since: Date.now(), expiresAt });
+    this.deliver(ws, { type: 'snapshot', ...this.snapshotFor(this.require(), actor) });
     this.scheduleBroadcast();
-    return new Response(null, { status: 101, webSocket: client });
   }
 
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  async onMessage(ws: Connection<SocketMeta>, message: WSMessage): Promise<void> {
     if (typeof message !== 'string' || message.length > 16_384) return;
-    const meta = ws.deserializeAttachment() as SocketMeta | null;
+    const meta = ws.state as SocketMeta | null;
     if (!meta) return;
     if (meta.revoked || !meta.actor.roles.length || !meta.expiresAt || meta.expiresAt <= Date.now()) {
       ws.close(1008, 'Session or membership expired'); return;
@@ -162,7 +175,7 @@ export class EventRoom extends DurableObject<Env> {
 
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'ping') {
-      this.send(ws, { type: 'pong', t: msg.t, serverTime: Date.now() });
+      this.deliver(ws, { type: 'pong', t: msg.t, serverTime: Date.now() });
     } else if (msg.type === 'cmd' && msg.cmd) {
       try {
         const cmd = parseCommand(msg.cmd);
@@ -170,25 +183,24 @@ export class EventRoom extends DurableObject<Env> {
           throw new CommandError('Production controls require fresh HTTP authentication', 403);
         }
         const actor = await resolveActor(this.env, meta.actor, this.require().id);
-        const current = ws.deserializeAttachment() as SocketMeta | null;
+        const current = ws.state as SocketMeta | null;
         if (!actor || current?.revoked || current?.roleVersion !== meta.roleVersion) {
           ws.close(1008, 'Membership changed'); return;
         }
         const result = await this.command(actor, cmd);
-        this.send(ws, { type: 'ack', id: msg.id, result });
+        this.deliver(ws, { type: 'ack', id: msg.id, result });
       } catch (error) {
-        if (error instanceof CommandError) this.send(ws, { type: 'ack', id: msg.id, result: { ok: false, error: error.message, status: error.status } });
-        else { console.error('Socket command failed', error); this.send(ws, { type: 'ack', id: msg.id, result: { ok: false, error: 'Could not save command', status: 500 } }); }
+        if (error instanceof CommandError) this.deliver(ws, { type: 'ack', id: msg.id, result: { ok: false, error: error.message, status: error.status } });
+        else { console.error('Socket command failed', error); this.deliver(ws, { type: 'ack', id: msg.id, result: { ok: false, error: 'Could not save command', status: 500 } }); }
       }
     }
   }
 
-  async webSocketClose(ws: WebSocket, code: number): Promise<void> {
-    try { ws.close(code === 1005 ? 1000 : code, 'bye'); } catch { /* already closed */ }
+  onClose(): void {
     this.scheduleBroadcast();
   }
 
-  async webSocketError(): Promise<void> {
+  onError(): void {
     this.scheduleBroadcast();
   }
 
@@ -277,8 +289,8 @@ export class EventRoom extends DurableObject<Env> {
 
   private presence(): PresenceEntry[] {
     const byEmail = new Map<string, PresenceEntry>();
-    for (const ws of this.ctx.getWebSockets()) {
-      const meta = ws.deserializeAttachment() as SocketMeta | null;
+    for (const ws of this.getConnections<SocketMeta>()) {
+      const meta = ws.state as SocketMeta | null;
       if (!meta || meta.revoked || !meta.expiresAt || meta.expiresAt <= Date.now()) continue;
       const a = meta.actor;
       if (!byEmail.has(a.email)) byEmail.set(a.email, { email: a.email, name: a.name, roles: a.roles, device: a.device ?? 'Device', since: meta.since });
@@ -298,16 +310,16 @@ export class EventRoom extends DurableObject<Env> {
       const s = this.state;
       if (!s) return;
       const presence = this.presence();
-      for (const ws of this.ctx.getWebSockets()) {
-        const meta = ws.deserializeAttachment() as SocketMeta | null;
+      for (const ws of this.getConnections<SocketMeta>()) {
+        const meta = ws.state as SocketMeta | null;
         if (!meta || meta.revoked) continue;
         if (!meta.expiresAt || meta.expiresAt <= Date.now()) { ws.close(1008, 'Session expired'); continue; }
-        this.send(ws, { type: 'snapshot', state: viewFor(s, meta.actor), me: meta.actor, serverTime: Date.now(), presence });
+        this.deliver(ws, { type: 'snapshot', state: viewFor(s, meta.actor), me: meta.actor, serverTime: Date.now(), presence });
       }
     }, 60);
   }
 
-  private send(ws: WebSocket, msg: unknown): void {
+  private deliver(ws: { send(data: string): void }, msg: unknown): void {
     try { ws.send(JSON.stringify(msg)); } catch { /* socket closing */ }
   }
 }

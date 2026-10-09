@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { BrowserRouter, Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, EventContext, EventStore, toast, useStore, useToasts, type EventCtx } from './store';
 import { Icon, ICONS, Logo, ROLE_LABEL, Tau } from './lib';
-import type { Command, Role } from '../shared/types';
+import type { Command, CommandResult, Role } from '../shared/types';
 import * as Production from './pages/production';
 import * as Backstage from './pages/backstage';
 import * as Audience from './pages/audience';
@@ -86,11 +86,12 @@ function Home() {
         {events === null && <span className="muted">Loading events…</span>}
         {events?.length === 0 && <span className="muted">No events yet. Create one below — it starts with demo content so every screen has something in it.</span>}
         {events?.map((e) => (
-          <Link key={e.id} to={`/e/${e.id}/${landingFor(e.roles)}`} className="panel" style={{ textDecoration: 'none', color: 'inherit' }}>
-            <span style={{ fontWeight: 600, fontSize: 16 }}>{e.name}</span>
-            <span className="muted small">{e.kind === 'social' ? 'Social' : 'Corporate'} · created {new Date(e.createdAt).toLocaleDateString()}</span>
-            <div className="row">{e.roles.map((r) => <span key={r} className="pill accent">{ROLE_LABEL[r]}</span>)}</div>
-          </Link>
+          <EventCard
+            key={e.id}
+            e={e}
+            onRename={(name) => setEvents((list) => list?.map((x) => (x.id === e.id ? { ...x, name } : x)) ?? list)}
+            onDelete={() => { setEvents((list) => list?.filter((x) => x.id !== e.id) ?? list); toast('Event deleted', 'info'); }}
+          />
         ))}
       </div>
       <div className="panel" style={{ maxWidth: 560 }}>
@@ -103,6 +104,83 @@ function Home() {
         <div><button className="btn primary" disabled={busy || !name.trim()} onClick={create}>Create event</button></div>
         <span className="muted small">You'll be its organizer. Add your team from Team &amp; setup.</span>
       </div>
+    </div>
+  );
+}
+
+/** One event on the home page. Organizers can rename it or delete it; deleting asks for the name first. */
+function EventCard({ e, onRename, onDelete }: { e: EventListItem; onRename: (name: string) => void; onDelete: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(e.name);
+  const [confirming, setConfirming] = useState(false);
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const organizer = e.roles.includes('organizer');
+
+  const save = async () => {
+    const next = name.trim();
+    if (!next || next === e.name) { setEditing(false); return; }
+    setBusy(true);
+    try {
+      const r = await api<CommandResult>(`/api/events/${e.id}/commands`, { method: 'POST', json: { type: 'RENAME_EVENT', name: next, venue: e.venue } });
+      if (!r.ok) throw new Error(r.error ?? 'Could not rename the event');
+      onRename(next);
+      setEditing(false);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Could not rename the event');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    try {
+      await api(`/api/events/${e.id}`, { method: 'DELETE' });
+      onDelete();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Could not delete the event');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel stack tight">
+      {editing ? (
+        <form className="stack tight" onSubmit={(ev) => { ev.preventDefault(); save(); }}>
+          <input className="field" value={name} onChange={(ev) => setName(ev.target.value)} aria-label="Event name" maxLength={120} autoFocus />
+          <div className="row">
+            <button className="btn primary sm" type="submit" disabled={busy || !name.trim()}>Save name</button>
+            <button className="btn sm" type="button" onClick={() => { setEditing(false); setName(e.name); }}>Cancel</button>
+          </div>
+        </form>
+      ) : (
+        <Link to={`/e/${e.id}/${landingFor(e.roles)}`} className="stack tight" style={{ textDecoration: 'none', color: 'inherit' }}>
+          <span style={{ fontWeight: 600, fontSize: 16 }}>{e.name}</span>
+          <span className="muted small">{e.kind === 'social' ? 'Social' : 'Corporate'} · created {new Date(e.createdAt).toLocaleDateString()}</span>
+          <div className="row">{e.roles.map((r) => <span key={r} className="pill accent">{ROLE_LABEL[r]}</span>)}</div>
+        </Link>
+      )}
+
+      {organizer && !editing && !confirming && (
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn sm" onClick={() => setEditing(true)}>Rename</button>
+          <button className="btn sm danger" onClick={() => setConfirming(true)}>Delete</button>
+        </div>
+      )}
+
+      {confirming && (
+        <form className="stack tight" onSubmit={(ev) => { ev.preventDefault(); if (typed === e.name) remove(); }}>
+          <span className="small">
+            Type <b>{e.name}</b> to delete this event. Its schedule, chat, journal, breakouts and team are removed for everyone, and this cannot be undone.
+          </span>
+          <input className="field" value={typed} onChange={(ev) => setTyped(ev.target.value)} aria-label="Type the event name to confirm" />
+          <div className="row">
+            <button className="btn danger sm" type="submit" disabled={busy || typed !== e.name}>Delete event</button>
+            <button className="btn sm" type="button" onClick={() => { setConfirming(false); setTyped(''); }}>Cancel</button>
+          </div>
+        </form>
+      )}
     </div>
   );
 }

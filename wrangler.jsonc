@@ -4,12 +4,12 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-09-01",
 
-  // The React app is served as static assets; /api/* always reaches the Worker first.
+  // The React app is served as static assets; /api/* and /parties/* (live sockets) always reach the Worker first.
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/parties/*"]
   },
 
   // Workers AI, used to translate chat messages.
@@ -26,17 +26,19 @@
     {
       "binding": "DB",
       "database_name": "habitat",
-      // Replace with the id printed by `npx wrangler d1 create habitat`.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "7980df29-5e0d-40a9-9206-1aecc179e09f",
       "migrations_dir": "migrations"
     }
   ],
 
+  // Public hostname for the app. The zone must be on this account.
+  "routes": [{ "pattern": "app.100ms.site", "custom_domain": true }],
+
   "vars": {
     // Your Cloudflare One team domain, e.g. "acme.cloudflareaccess.com".
-    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_TEAM_DOMAIN": "ledgerwriter.cloudflareaccess.com",
     // The Application Audience (AUD) tag of the Access application protecting this Worker.
-    "ACCESS_AUD": "",
+    "ACCESS_AUD": "6042c82d961fb3d2ea8a0cb63c2c10fe088e42c854db26a8ab2fbe0b626bf8d3",
     // When "true", production controls (take, cues, audio, stream bus) only work from WARP devices.
     "REQUIRE_WARP_FOR_PRODUCTION": "true",
     // Never "true" in production. Local development sign-in; also limited to localhost.

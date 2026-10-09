@@ -1,10 +1,11 @@
-import { Hono } from 'hono';
+import { Hono, type Context, type Next } from 'hono';
 import type { Env } from './env';
 import { authenticate, devAuthEnabled, devCookie, type Identity } from './auth';
 import { ALL_ROLES, type Role } from '../shared/types';
 import { CommandError } from '../shared/command';
 import { resolveActor as actorFor } from './membership';
 import { readJson } from './request';
+import { getServerByName } from 'partyserver';
 import { generateBreakoutNotes, NotesUnavailable } from './notes';
 import { translateText } from './translate';
 import { isLanguageCode, TRANSLATION_MAX_CHARS } from '../shared/languages';
@@ -34,7 +35,7 @@ app.post('/api/dev/logout', (c) => {
 
 // ------------------------------------------------------------------ authentication
 
-app.use('/api/*', async (c, next) => {
+const requireIdentity = async (c: Context<{ Bindings: Env; Variables: Vars }>, next: Next) => {
   const identity = await authenticate(c.req.raw, c.env, c.req.path.endsWith('/commands'));
   if (!identity) {
     return c.json({ error: 'Not signed in', devAuth: devAuthEnabled(c.env, c.req.raw) }, 401);
@@ -46,7 +47,9 @@ app.use('/api/*', async (c, next) => {
     ).bind(identity.email, identity.name, Date.now(), identity.warp ? 1 : 0).run().catch(() => undefined),
   );
   await next();
-});
+};
+app.use('/api/*', requireIdentity);
+app.use('/parties/*', requireIdentity);
 
 app.get('/api/me', (c) => {
   const id = c.get('identity');
@@ -115,14 +118,17 @@ app.get('/api/events/:id/journal', async (c) => {
   return c.json(await room(c.env, c.req.param('id')).journal(actor, before ? Number(before) : null, limit));
 });
 
-app.get('/api/events/:id/ws', async (c) => {
+// Live event socket: PartyServer routes /parties/events/:id to the event's EventRoom.
+// The Worker has already checked Access and membership, so the room trusts these headers.
+app.get('/parties/events/:id', async (c) => {
   if (c.req.header('Upgrade') !== 'websocket') return c.json({ error: 'Expected WebSocket' }, 426);
   const actor = await actorFor(c.env, c.get('identity'), c.req.param('id'));
   if (!actor) return c.json({ error: 'No access to this event' }, 403);
   const headers = new Headers(c.req.raw.headers);
   headers.set('X-Actor', JSON.stringify(actor));
   headers.set('X-Session-Expires', String(Math.min(c.get('identity').expiresAt, Date.now() + 5 * 60_000)));
-  return room(c.env, c.req.param('id')).fetch(new Request(c.req.raw.url, { headers }));
+  const live = await getServerByName(c.env.EVENTS, c.req.param('id'));
+  return live.fetch(new Request(c.req.raw.url, { headers }));
 });
 
 // ------------------------------------------------------------------ translation
@@ -164,6 +170,23 @@ app.post('/api/events/:id/breakouts/:bid/notes', async (c) => {
   }
   const result = await events.command(actor, { type: 'SET_BREAKOUT_NOTES', breakoutId: read.breakout.id, text });
   return c.json(result, result.ok ? 200 : errorStatus(result.status ?? 400));
+});
+
+app.delete('/api/events/:id', async (c) => {
+  const eventId = c.req.param('id');
+  if (!(await requireOrganizer(c.env, c.get('identity'), eventId))) return c.json({ error: 'Organizers only' }, 403);
+  // Membership goes first: once it is gone nobody can reach the room, even if clearing it fails below.
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM members WHERE event_id = ?').bind(eventId),
+    c.env.DB.prepare('DELETE FROM events WHERE id = ?').bind(eventId),
+  ]);
+  try {
+    await room(c.env, eventId).destroy();
+  } catch (err) {
+    // The event is already gone for everyone; a leftover room holds no reachable data.
+    console.error('Event room cleanup failed', err);
+  }
+  return c.json({ ok: true });
 });
 
 // ------------------------------------------------------------------ team (organizers)
