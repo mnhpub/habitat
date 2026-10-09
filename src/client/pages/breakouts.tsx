@@ -10,11 +10,13 @@ export function Breakouts() {
   const { snap, send, has } = useEvent();
   const s = snap.state;
   const me = snap.me.email;
-  const mine = currentBreakout(s.breakouts, me);
+  // Older or partial records may lack the arrays a room renders; treat them as empty.
+  const rooms: Breakout[] = (s.breakouts ?? []).map((b) => ({ ...b, members: b.members ?? [], messages: b.messages ?? [] }));
+  const mine = currentBreakout(rooms, me);
   const [viewId, setViewId] = useState<string | null>(null);
-  const viewing = s.breakouts.find((b) => b.id === viewId) ?? mine ?? s.breakouts.find((b) => b.status === 'open');
-  const open = s.breakouts.filter((b) => b.status === 'open');
-  const ended = s.breakouts.filter((b) => b.status === 'ended');
+  const viewing = rooms.find((b) => b.id === viewId) ?? mine ?? rooms.find((b) => b.status === 'open');
+  const open = rooms.filter((b) => b.status === 'open');
+  const ended = rooms.filter((b) => b.status === 'ended');
 
   return (
     <div className="cols">

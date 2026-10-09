@@ -8,6 +8,7 @@ import * as Backstage from './pages/backstage';
 import * as Audience from './pages/audience';
 import * as Ops from './pages/ops';
 import * as Breakouts from './pages/breakouts';
+import { PageBoundary } from './error-boundary';
 
 interface Me { identity: { email: string; name: string; warp: boolean; device: string; source: 'access' | 'dev' }; devAuth: boolean; requireWarp: boolean }
 
@@ -373,7 +374,7 @@ function EventShell() {
           </header>
           <Routes>
             {SCREENS.flatMap((g) => g.items).map((s) => (
-              <Route key={s.path} path={s.path} element={visible(s) ? <div className="page">{s.el()}</div> : <NoAccess />} />
+              <Route key={s.path} path={s.path} element={visible(s) ? <div className="page"><PageBoundary key={s.path}>{s.el()}</PageBoundary></div> : <NoAccess />} />
             ))}
             <Route path="*" element={<Navigate to={firstPath} replace />} />
           </Routes>
