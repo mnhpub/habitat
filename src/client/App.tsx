@@ -354,7 +354,7 @@ function EventShell() {
             return (
               <div key={g.group}>
                 <div className="group">{g.group}</div>
-                {items.map((s) => <NavLink key={s.path} to={s.path} className={({ isActive }) => (isActive ? 'active' : '')}>{s.title}</NavLink>)}
+                {items.map((s) => <NavLink key={s.path} to={`/e/${eventId}/${s.path}`} className={({ isActive }) => (isActive ? 'active' : '')}>{s.title}</NavLink>)}
               </div>
             );
           })}
@@ -376,7 +376,7 @@ function EventShell() {
             {SCREENS.flatMap((g) => g.items).map((s) => (
               <Route key={s.path} path={s.path} element={visible(s) ? <div className="page"><PageBoundary key={s.path}>{s.el()}</PageBoundary></div> : <NoAccess />} />
             ))}
-            <Route path="*" element={<Navigate to={firstPath} replace />} />
+            <Route path="*" element={<Navigate to={`/e/${eventId}/${firstPath}`} replace />} />
           </Routes>
         </div>
       </div>
