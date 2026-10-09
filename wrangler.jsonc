@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "habitat",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-01",
+
+  // The React app is served as static assets; /api/* always reaches the Worker first.
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+
+  // One EventRoom Durable Object per event: the authoritative event clock, state and journal.
+  "durable_objects": {
+    "bindings": [{ "name": "EVENTS", "class_name": "EventRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["EventRoom"] }],
+
+  // Events, team memberships and users.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "habitat",
+      // Replace with the id printed by `npx wrangler d1 create habitat`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "vars": {
+    // Your Cloudflare One team domain, e.g. "acme.cloudflareaccess.com".
+    "ACCESS_TEAM_DOMAIN": "",
+    // The Application Audience (AUD) tag of the Access application protecting this Worker.
+    "ACCESS_AUD": "",
+    // When "true", production controls (take, cues, audio, stream bus) only work from WARP devices.
+    "REQUIRE_WARP_FOR_PRODUCTION": "true",
+    // Never "true" in production. Local development sign-in; also limited to localhost.
+    "DEV_AUTH": "false"
+  },
+
+  "observability": { "enabled": true }
+}
