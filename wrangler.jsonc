@@ -21,6 +21,15 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["EventRoom"] }],
 
+  // Session recordings: parts uploaded from the video room, one object each.
+  "r2_buckets": [{ "binding": "RECORDINGS", "bucket_name": "habitat-recordings" }],
+
+  // Email Service. MAIL_FROM must be on a domain onboarded with `wrangler email sending enable`.
+  "send_email": [{ "name": "EMAIL" }],
+
+  // Recurring sessions are created ahead, and email campaigns keep sending, on this schedule.
+  "triggers": { "crons": ["*/10 * * * *"] },
+
   // Events, team memberships and users.
   "d1_databases": [
     {
@@ -39,6 +48,13 @@
     "ACCESS_TEAM_DOMAIN": "ledgerwriter.cloudflareaccess.com",
     // The Application Audience (AUD) tag of the Access application protecting this Worker.
     "ACCESS_AUD": "6042c82d961fb3d2ea8a0cb63c2c10fe088e42c854db26a8ab2fbe0b626bf8d3",
+    // Cloudflare Realtime SFU app for the video room. Its App Secret is set with `wrangler secret put REALTIME_APP_SECRET`.
+    "REALTIME_APP_ID": "118f56fb11f035dc145537e5ad4e4a85",
+    // Sender for sign-up notices and campaigns. Must be on an onboarded domain.
+    "MAIL_FROM": "events@100ms.site",
+    "MAIL_FROM_NAME": "Habitat",
+    // Public origin used in links that go out by email.
+    "PUBLIC_URL": "https://app.100ms.site",
     // When "true", production controls (take, cues, audio, stream bus) only work from WARP devices.
     "REQUIRE_WARP_FOR_PRODUCTION": "true",
     // Never "true" in production. Local development sign-in; also limited to localhost.

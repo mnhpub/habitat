@@ -19,7 +19,10 @@ EventRoom Durable Object  — one per event
   • authorizes, applies, journals and broadcasts every command
   • hibernating WebSockets; each viewer gets their own projection of the state
   • alarms fire auto cues on the event clock, even with nobody connected
-D1  — events, team memberships (roles), users
+D1  — workspaces (tenants), events, team memberships, recurring series, followers, email campaigns, recording index
+R2  — session recording parts (one object per upload)
+Cloudflare Email Sending (send_email binding) — sign-up notices and campaigns
+Cron trigger — creates recurring sessions ahead of time and keeps campaigns sending
 Static assets — the React app (Workers assets, SPA routing)
 ```
 
@@ -30,7 +33,14 @@ Static assets — the React app (Workers assets, SPA routing)
 | `src/shared/command.ts` | Runtime validation of every incoming command |
 | `src/shared/view.ts` | Per-viewer projection: hides who voted for what, anonymous authors, other guests' details, budget, held chat |
 | `src/shared/seed.ts` | Demo content every new event starts with |
-| `src/worker/index.ts` | API routes (events, team, snapshot, commands, journal, WebSocket) |
+| `src/worker/index.ts` | API routes (events, team, snapshot, commands, journal, WebSocket) and the cron handler |
+| `src/worker/routes/workspaces.ts` | Workspaces, their members and roles, recurring series, following |
+| `src/worker/routes/marketing.ts` | Email campaigns, unsubscribe, calendar feeds |
+| `src/worker/routes/recordings.ts` | Team session recording: start, ordered part upload, stop, download |
+| `src/worker/series.ts`, `src/shared/recurrence.ts` | Recurring sessions: time-zone-aware occurrences and materialization |
+| `src/worker/campaigns.ts`, `src/worker/mail.ts`, `src/worker/tokens.ts` | Audiences, opt-outs, sending with retries, signed unsubscribe links |
+| `src/shared/survey.ts`, `src/shared/csv.ts`, `src/shared/ics.ts` | Survey projection, CSV import/export, calendar files |
+| `src/client/recorder.ts` | Browser recorder for the video room |
 | `src/worker/auth.ts` | Cloudflare Access JWT verification and WARP detection; localhost-only dev sign-in |
 | `src/worker/event-room.ts` | The EventRoom Durable Object |
 | `src/client/` | React app; `pages/` holds all the screens |
@@ -43,9 +53,21 @@ Each screen shows up in the left navigation for the roles that use it. Organizer
 
 - **Production:** control room, simple control room, event clock & devices (with the full journal), stream bus, bridge
 - **Talent & backstage:** green room (real camera/mic preflight in the browser), talent iPhone view, stage manager, camera operator
-- **Audience:** how to attend (registration, .ics calendar), lobby & stage, engage, vote, Q&A + chat, my event (pass, seat orders, valet), networking tables, watch party
+- **Audience:** how to attend (registration, .ics calendar), sign up, lobby & stage, engage, vote, surveys, Q&A + chat, my event (pass, seat orders, valet), networking tables, watch party, video room (with team recording)
 - **Moderation:** moderator console, host iPad view
-- **Operations:** organizer (lifecycle, gates, workstreams, budget, incidents), team & setup (small-team role bundles, members), attendee types, check-in (with Verify with Wallet flow), orders & valet
+- **Operations:** organizer (lifecycle, gates, workstreams, budget, incidents), team & setup (small-team role bundles, members), attendee types, sign-up form, guest roster (CSV import and export), check-in (with Verify with Wallet flow), orders & valet
+- **Workspace** (from the home page): sessions, recurring series, following and calendar links, email campaigns, team recordings, team
+
+### Workspaces, sign-up and sessions
+
+- **Workspaces** are tenants. Anyone signed in can create one and becomes its owner. Owners and admins manage the team (owner, admin, member), campaigns and recordings. Members create events and recurring series. An event belongs to exactly one workspace. Events that already existed were moved into a workspace named after their creator.
+- **Recurring sessions** repeat weekly or monthly in a named time zone, so 18:00 stays 18:00 across daylight-saving changes. Sessions are created up to eight weeks ahead, each in its own room. Later sessions copy the team of the first. Stopping a series creates no more sessions.
+- **Event sign-up** is a public form with questions, an optional capacity and an open/closed switch. People who arrive after capacity are waitlisted, and an organizer approves them when there is room.
+- **Guest roster** lists registrations with sign-up answers, filters by waitlist, and exports and imports CSV (name, email, attendance). Duplicate emails are skipped on import.
+- **Surveys** have rating, choice and written questions. Drafts stay hidden until opened. Each person answers once. Anonymous surveys record nothing that names the respondent (only a hash is kept to block a second answer), and attendees see only summaries.
+- **Following**: people follow a workspace or a public series. They get an email when a session is scheduled and a calendar subscription (`.ics`) of public sessions. Private sessions are never shared.
+- **Email campaigns** go to followers, to the registered guests of one session (only that session's organizers can send to it), or to a series' followers. Every message carries a signed one-click unsubscribe link and a `List-Unsubscribe` header. Opt-outs are checked at send time, and failed sends are retried three times before they are marked failed.
+- **Team session recording** records the video room in the browser and uploads it in ten-second parts. Everyone in the room sees a recording indicator, and only the person who started it, or crew, can stop it. Recordings are private to crew, the starter, and workspace admins.
 
 ### Roles
 
@@ -108,6 +130,19 @@ npm run deploy
 
 Or attach a custom domain, such as `events.yourcompany.com`, under Workers → Settings → Domains.
 
+**2b. Create the recording bucket and the email sender**
+
+```bash
+npx wrangler r2 bucket create habitat-recordings
+npx wrangler email sending enable 100ms.site        # or your own domain
+npx wrangler secret put UNSUBSCRIBE_SECRET          # any long random string; signs unsubscribe links
+npm run db:migrate:remote                            # applies migrations 0002 and 0003
+```
+
+Set `MAIL_FROM` (a sender on that domain), `MAIL_FROM_NAME` and `PUBLIC_URL` (the public origin, used in email links) in `wrangler.jsonc`. Until `UNSUBSCRIBE_SECRET` is set, campaign sends are refused with a clear message. Sign-up notices are sent the same way.
+
+Email goes out through Cloudflare Email Sending (the `send_email` binding). Its guidance is aimed at transactional mail, so moderate lists work, but large newsletters should go through a dedicated marketing provider. Swap `src/worker/mail.ts` to do it.
+
 **3. Protect it with Cloudflare Access** (Zero Trust dashboard → Access → Applications → Add → Self-hosted)
 
 - **Domain:** the Worker's hostname.
@@ -115,6 +150,7 @@ Or attach a custom domain, such as `events.yourcompany.com`, under Workers → S
 - **Policies:**
   - **Crew:** Allow → Emails ending in `@yourcompany.com` (or a group), **Require → Gateway** so the device must be on WARP.
   - **Attendees** (optional, if guests use the same hostname): Allow → your attendee IdP or one-time PIN, without the Gateway requirement. Production commands are still refused to non-WARP devices by the Worker.
+- **Bypass** for `/api/public/*` (Access → Applications → Add → Bypass, or a second application with Bypass policy). Unsubscribe links and calendar feeds are opened from email and calendar apps, which cannot sign in. Each of those routes checks its own signed or random token, and nothing else is exposed there.
 - Copy the application's **Audience (AUD) tag**.
 
 **4. Configure the Worker**
@@ -148,10 +184,16 @@ Zero Trust → Settings → WARP Client. Enroll producer and stage-manager Macs,
 **Simulated, with where the real thing plugs in:**
 - **Video and audio media.** Monitors show placeholders and meters are animated. Program state, tally and routing are real. The media layer is Cloudflare Realtime (SFU) for contribution and the bridge, plus Cloudflare Stream (WHIP/WHEP) for delivery. Publish tracks per source id and let `production.programId` drive the composer.
 - **Apple Wallet passes and Verify with Wallet.** These need your Pass Type ID certificate and Apple's entitlement. The check-in screen walks through the flow with a simulated consent step.
+- **Session recording is browser-side.** The video room's own tiles and mixed audio are recorded in each recording person's browser and uploaded in parts. Server-side (SFU) recording is not wired, so a recording stops if the person who started it loses their connection for longer than the upload retries. Breakouts are chat-only and are not recorded.
+- **Email campaigns** send through Cloudflare Email Sending, which is aimed at transactional mail. See the note under Deploy.
 - **Apple Pay and vendor payouts.** Orders are recorded and settled in the event state. Connect Apple Pay through your payment processor (e.g. Stripe with Connect for multiple vendors) where the `ORDER` command is handled.
 - **OSC / Avid / MIDI control surfaces.** They issue the same commands over the event WebSocket through a gateway enrolled in WARP.
 
 ## Notes for scale
+
+- Workspaces, series and campaigns live in D1. Each event's live state stays in its Durable Object. The two are not transactional with each other; an event is created in D1 first and then initialized, and a retry cannot duplicate a series session because the database enforces one event per series start time.
+- Campaign recipients are fixed at send time and capped at 5,000 per campaign. Each recipient is a separate send, so large audiences take several cron runs.
+- Survey responses live in the event's Durable Object within the same 8 MiB state budget as the rest of the event. Large surveys should move to their own storage.
 
 - Each command writes a transaction containing the journal entry and the event state in chunks below 512 KiB, then updates memory and broadcasts viewer projections, coalesced every 60 ms. Existing single-row snapshots migrate automatically on first load.
 - Event state has an 8 MiB budget. New submissions stop at 7 MiB, leaving headroom for production controls and moderation. Capacity failures return a structured 409 and leave the previous state intact. This is a bounded prototype storage model; large events need collection-specific storage and paginated views.

@@ -1,33 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
 import app from '../src/worker/index';
 import { devCookie } from '../src/worker/auth';
 import { fixture } from './fixtures/room';
+import { d1, migratedDatabase } from './fixtures/platform';
 
 function apiFixture() {
-  const db = new DatabaseSync(':memory:');
-  db.exec(readFileSync('migrations/0001_init.sql', 'utf8'));
+  const db = migratedDatabase();
   const rooms = new Map<string, ReturnType<typeof fixture>>();
   const env = {
     DEV_AUTH: 'true', REQUIRE_WARP_FOR_PRODUCTION: 'true',
-    DB: {
-      prepare(query: string) {
-        let args: any[] = [];
-        return {
-          bind(...values: any[]) { args = values; return this; },
-          async all() { return { results: db.prepare(query).all(...args) }; },
-          async first() { return db.prepare(query).get(...args) ?? null; },
-          async run() { db.prepare(query).run(...args); return { success: true }; },
-        };
-      },
-      async batch(statements: { run: () => Promise<unknown> }[]) {
-        const results = [];
-        for (const statement of statements) results.push(await statement.run());
-        return results;
-      },
-    },
+    DB: d1(db),
     EVENTS: {
       idFromName: (id: string) => id,
       get(id: string) {

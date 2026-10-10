@@ -165,7 +165,55 @@ export interface Guest {
   checkedInAt?: number;
   verified?: boolean;
   grantedRole?: string;
+  /** Answers to the event's sign-up questions, keyed by question id. */
+  answers?: Record<string, string>;
+  /** Signed up after capacity was reached; not counted against capacity until approved. */
+  waitlisted?: boolean;
 }
+
+export interface SignupQuestion { id: string; label: string; required: boolean }
+
+/** The public sign-up form for an event. Attendees see it; only organizers change it. */
+export interface SignupForm {
+  open: boolean;
+  /** Maximum registered (not waitlisted) guests, or null for no limit. */
+  capacity: number | null;
+  questions: SignupQuestion[];
+}
+
+export interface SurveyQuestion {
+  id: string;
+  prompt: string;
+  kind: 'rating' | 'choice' | 'text';
+  /** Choice labels. Rating questions always use 1–5. */
+  options: string[];
+}
+
+export interface SurveyResponse {
+  id: string;
+  /** Omitted for anonymous surveys. Never sent to attendees. */
+  by?: string;
+  byName?: string;
+  /** Rating: 1–5. Choice: option index. Text: the answer. */
+  answers: Record<string, number | string>;
+  ts: number;
+}
+
+export interface Survey {
+  id: string;
+  title: string;
+  status: 'draft' | 'open' | 'closed';
+  anonymous: boolean;
+  questions: SurveyQuestion[];
+  responses: SurveyResponse[];
+  /** Emails that have answered, so each person answers once. Never projected to viewers. */
+  responded: string[];
+  createdBy: string;
+  createdAt: number;
+}
+
+/** A session that is being recorded right now. Keyed by session in EventState.sessionRecordings. */
+export interface SessionRecording { recordingId: string; by: string; startedAt: number }
 
 export interface Order {
   id: string;
@@ -194,6 +242,9 @@ export interface Vendor { id: string; name: string; meta: string; status: string
 export interface Incident { id: string; title: string; detail: string; owner: string; open: boolean; ts: number }
 
 export interface NetTable { id: string; name: string; capacity: number; seats: string[]; note: string }
+
+/** One person's published media in the video room. */
+export interface CallParticipant { email: string; name: string; sessionId: string; tracks: string[]; joinedAt: number }
 
 export interface BreakoutMessage { id: string; author: string; authorName: string; text: string; ts: number }
 
@@ -264,6 +315,10 @@ export interface EventState {
   resources: { id: string; title: string; note: string }[];
 
   guests: Guest[];
+  signup: SignupForm;
+  surveys: Survey[];
+  /** Sessions being recorded now, keyed by session ("call"). Recording files live in R2 and D1. */
+  sessionRecordings: Record<string, SessionRecording>;
   orders: Order[];
   valet: ValetTicket[];
 
@@ -275,6 +330,8 @@ export interface EventState {
 
   tables: NetTable[];
   breakouts: Breakout[];
+  /** Who is in the video room, and where their media is published on the Realtime SFU. */
+  call: CallParticipant[];
   bridgeLog: BridgeEntry[];
   /** email -> mic live on the bridge */
   bridgeMics: Record<string, boolean>;
@@ -353,7 +410,22 @@ export type Command =
   | { type: 'LEAVE_BREAKOUT' }
   | { type: 'END_BREAKOUT'; breakoutId: string }
   | { type: 'BREAKOUT_CHAT'; text: string }
-  | { type: 'SET_BREAKOUT_NOTES'; breakoutId: string; text: string };
+  | { type: 'SET_BREAKOUT_NOTES'; breakoutId: string; text: string }
+  // video room (Cloudflare Realtime)
+  | { type: 'CALL_JOIN'; sessionId: string; tracks: string[] }
+  | { type: 'CALL_LEAVE' }
+  // sign-up, guest roster
+  | { type: 'SET_SIGNUP_FORM'; open: boolean; capacity: number | null; questions: SignupQuestion[] }
+  | { type: 'SIGNUP'; mode: Guest['mode']; name?: string; answers: Record<string, string> }
+  | { type: 'SET_GUEST_WAITLIST'; guestId: string; waitlisted: boolean }
+  | { type: 'IMPORT_GUESTS'; rows: { name: string; email?: string; mode: 'in_person' | 'online' | 'on_demand' }[] }
+  // surveys
+  | { type: 'SURVEY_CREATE'; title: string; anonymous: boolean; questions: Omit<SurveyQuestion, 'id'>[] }
+  | { type: 'SURVEY_SET_STATUS'; surveyId: string; status: Survey['status'] }
+  | { type: 'SURVEY_DELETE'; surveyId: string }
+  | { type: 'SURVEY_RESPOND'; surveyId: string; answers: Record<string, number | string> }
+  // session recording (team video)
+  | { type: 'SET_SESSION_RECORDING'; key: string; recordingId: string | null };
 
 export type CommandType = Command['type'];
 
@@ -387,7 +459,34 @@ export interface QuestionView extends Omit<Question, 'upvotes' | 'author'> {
   byMe: boolean;
 }
 
-export interface EventView extends Omit<EventState, 'polls' | 'questions'> {
+/** A survey as one viewer may see it. Attendees get summaries; only crew get individual responses. */
+export interface SurveyView {
+  id: string;
+  title: string;
+  status: Survey['status'];
+  anonymous: boolean;
+  questions: SurveyQuestion[];
+  responseCount: number;
+  /** Whether this viewer has already answered. */
+  answered: boolean;
+  summary: SurveySummary[];
+  /** Crew only. Authors are removed from anonymous surveys. */
+  responses: SurveyResponse[];
+}
+
+export interface SurveySummary {
+  questionId: string;
+  /** Rating: average over answers, and counts for 1–5. */
+  average?: number;
+  counts?: number[];
+  /** Choice: count per option. */
+  optionCounts?: number[];
+  /** Text: answers with no author attached. */
+  texts?: string[];
+}
+
+export interface EventView extends Omit<EventState, 'polls' | 'questions' | 'surveys'> {
   polls: PollView[];
   questions: QuestionView[];
+  surveys: SurveyView[];
 }

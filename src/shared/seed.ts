@@ -6,28 +6,30 @@ const MIN = 60_000;
  * A new event starts from this demo content so every screen has something to show.
  * Organizers can clear or change it; everything here is ordinary state.
  */
-export function seedEvent(id: string, name: string, kind: 'corporate' | 'social', createdBy: string, now: number): EventState {
-  const epoch = now - 64 * MIN; // the show has been running ~1 hour
+export function seedEvent(id: string, name: string, kind: 'corporate' | 'social', createdBy: string, now: number, startsAt?: number): EventState {
+  // A scheduled occurrence starts at its time: τ is negative (a countdown) until then.
+  const upcoming = startsAt !== undefined && startsAt > now;
+  const epoch = startsAt ?? now - 64 * MIN; // otherwise the show has been running ~1 hour
   return {
     id,
     name,
     kind,
     venue: 'Ballroom B + online',
     createdBy,
-    lifecycle: 'Active',
+    lifecycle: upcoming ? 'Committed' : 'Active',
     epoch,
     seq: 0,
     team: { size: 6 },
 
     production: {
-      onAir: true,
+      onAir: !upcoming,
       hold: false,
-      recording: true,
+      recording: !upcoming,
       programId: 'tal-a',
       previewId: 'tal-b',
       autoDirector: true,
       layout: 'speaker',
-      autoRun: true,
+      autoRun: !upcoming,
       cueIndex: 1,
     },
     sources: [
@@ -184,6 +186,10 @@ export function seedEvent(id: string, name: string, kind: 'corporate' | 'social'
     ],
     bridgeMics: {},
     breakouts: [],
+    call: [],
+    sessionRecordings: {},
+    signup: { open: false, capacity: null, questions: [] },
+    surveys: [],
     recent: [],
   };
 }

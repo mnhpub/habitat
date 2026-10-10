@@ -9,6 +9,11 @@ import * as Audience from './pages/audience';
 import * as Ops from './pages/ops';
 import * as Breakouts from './pages/breakouts';
 import { PageBoundary } from './error-boundary';
+import * as Video from './pages/video';
+import { Roster } from './pages/roster';
+import { SignUp, SignUpSettings } from './pages/signup';
+import { Surveys } from './pages/surveys';
+import { WorkspacePage } from './pages/workspace';
 
 interface Me { identity: { email: string; name: string; warp: boolean; device: string; source: 'access' | 'dev' }; devAuth: boolean; requireWarp: boolean }
 
@@ -19,6 +24,7 @@ export default function App() {
         <Route path="/" element={<Home />} />
         <Route path="/dev-login" element={<DevLogin />} />
         <Route path="/e/:eventId/*" element={<EventShell />} />
+        <Route path="/w/:orgId" element={<WorkspacePage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <Toasts />
@@ -48,30 +54,60 @@ function useMe() {
 
 // ---------------------------------------------------------------- home
 
-interface EventListItem { id: string; name: string; kind: string; venue: string; createdAt: number; roles: Role[]; member: boolean }
+interface EventListItem { id: string; name: string; kind: string; venue: string; createdAt: number; orgId: string | null; startsAt: number | null; roles: Role[]; member: boolean }
+
+interface OrgItem { id: string; name: string; role: Role }
 
 function Home() {
   const { me, state, err } = useMe();
   const [events, setEvents] = useState<EventListItem[] | null>(null);
+  const [orgs, setOrgs] = useState<OrgItem[] | null>(null);
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'corporate' | 'social'>('corporate');
+  const [orgId, setOrgId] = useState('');
+  const [when, setWhen] = useState('');
+  const [newOrg, setNewOrg] = useState('');
   const [busy, setBusy] = useState(false);
   const nav = useNavigate();
 
-  useEffect(() => { if (state === 'ok') api<EventListItem[]>('/api/events').then(setEvents).catch(() => setEvents([])); }, [state]);
+  const loadOrgs = () => api<OrgItem[]>('/api/orgs').then((list) => {
+    setOrgs(list);
+    setOrgId((current) => (list.some((o) => o.id === current) ? current : list[0]?.id ?? ''));
+  }).catch(() => setOrgs([]));
+
+  useEffect(() => {
+    if (state !== 'ok') return;
+    api<EventListItem[]>('/api/events').then(setEvents).catch(() => setEvents([]));
+    void loadOrgs();
+  }, [state]);
   if (state === 'devlogin') return <Navigate to="/dev-login" replace />;
   if (state === 'loading') return <Centered><span className="muted">Loading…</span></Centered>;
   if (state === 'signin') return <Centered><SignInHelp /></Centered>;
   if (state === 'error') return <Centered><div className="banner">Couldn't reach the server: {err}</div></Centered>;
 
+  const createWorkspace = async () => {
+    if (!newOrg.trim()) return;
+    setBusy(true);
+    try {
+      const { id } = await api<{ id: string }>('/api/orgs', { method: 'POST', json: { name: newOrg } });
+      setNewOrg('');
+      await loadOrgs();
+      setOrgId(id);
+      toast('Workspace created. You are its owner.', 'info');
+    } catch (e) { toast(e instanceof Error ? e.message : 'Could not create the workspace'); } finally { setBusy(false); }
+  };
+
   const create = async () => {
     if (!name.trim()) return;
     setBusy(true);
     try {
-      const { id } = await api<{ id: string }>('/api/events', { method: 'POST', json: { name, kind } });
+      const startsAt = when ? new Date(when).getTime() : undefined;
+      const { id } = await api<{ id: string }>('/api/events', { method: 'POST', json: { name, kind, orgId: orgId || undefined, startsAt } });
       nav(`/e/${id}/organizer`);
     } catch (e) { toast(e instanceof Error ? e.message : 'Could not create event'); } finally { setBusy(false); }
   };
+
+  const workspaceName = (id: string | null) => orgs?.find((o) => o.id === id)?.name;
 
   return (
     <div style={{ maxWidth: 960, margin: '0 auto', padding: '28px 20px' }} className="stack loose">
@@ -79,6 +115,21 @@ function Home() {
         <div className="row"><Logo /><span style={{ fontWeight: 700, fontSize: 18 }}>Habitat</span></div>
         <Identity me={me!} />
       </div>
+
+      <div className="panel stack tight">
+        <span className="label">Workspaces</span>
+        <span className="small muted">A workspace is your organization on Habitat: its events, team, recurring sessions, followers and email.</span>
+        {orgs?.length ? (
+          <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+            {orgs.map((o) => <Link key={o.id} to={`/w/${o.id}`} className="pill accent" style={{ textDecoration: 'none' }}>{o.name} · {o.role}</Link>)}
+          </div>
+        ) : <span className="small muted">You don't have a workspace yet. One is created the first time you make an event, or create one here.</span>}
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <input className="field" style={{ flex: '1 1 220px' }} placeholder="New workspace, e.g. Acme Events" maxLength={120} value={newOrg} onChange={(e) => setNewOrg(e.target.value)} aria-label="New workspace name" />
+          <button className="btn" disabled={busy || !newOrg.trim()} onClick={createWorkspace}>Create workspace</button>
+        </div>
+      </div>
+
       <div className="stack tight">
         <h1>Your events</h1>
         <span className="muted">Every event is its own live venue: stages, backstage, lobby, services and its own clock.</span>
@@ -90,6 +141,7 @@ function Home() {
           <EventCard
             key={e.id}
             e={e}
+            workspace={workspaceName(e.orgId)}
             onRename={(name) => setEvents((list) => list?.map((x) => (x.id === e.id ? { ...x, name } : x)) ?? list)}
             onDelete={() => { setEvents((list) => list?.filter((x) => x.id !== e.id) ?? list); toast('Event deleted', 'info'); }}
           />
@@ -98,19 +150,29 @@ function Home() {
       <div className="panel" style={{ maxWidth: 560 }}>
         <span className="label">Create an event</span>
         <label className="fieldlabel">Event name<input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Partner Summit 2026" /></label>
+        {orgs && orgs.length > 1 && (
+          <label className="fieldlabel">Workspace
+            <select className="field" value={orgId} onChange={(e) => setOrgId(e.target.value)}>
+              {orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </label>
+        )}
+        <label className="fieldlabel">Starts (optional, leave empty to start now)
+          <input className="field" type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
+        </label>
         <div className="seg" role="radiogroup" aria-label="Kind">
           <button type="button" role="radio" aria-checked={kind === 'corporate'} className={kind === 'corporate' ? 'on' : ''} onClick={() => setKind('corporate')}>Corporate</button>
           <button type="button" role="radio" aria-checked={kind === 'social'} className={kind === 'social' ? 'on' : ''} onClick={() => setKind('social')}>Social</button>
         </div>
         <div><button className="btn primary" disabled={busy || !name.trim()} onClick={create}>Create event</button></div>
-        <span className="muted small">You'll be its organizer. Add your team from Team &amp; setup.</span>
+        <span className="muted small">You'll be its organizer. Add your team from Team &amp; setup. To repeat a session, open its workspace and create a recurring series.</span>
       </div>
     </div>
   );
 }
 
 /** One event on the home page. Organizers can rename it or delete it; deleting asks for the name first. */
-function EventCard({ e, onRename, onDelete }: { e: EventListItem; onRename: (name: string) => void; onDelete: () => void }) {
+function EventCard({ e, workspace, onRename, onDelete }: { e: EventListItem; workspace?: string; onRename: (name: string) => void; onDelete: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(e.name);
   const [confirming, setConfirming] = useState(false);
@@ -158,7 +220,11 @@ function EventCard({ e, onRename, onDelete }: { e: EventListItem; onRename: (nam
       ) : (
         <Link to={`/e/${e.id}/${landingFor(e.roles)}`} className="stack tight" style={{ textDecoration: 'none', color: 'inherit' }}>
           <span style={{ fontWeight: 600, fontSize: 16 }}>{e.name}</span>
-          <span className="muted small">{e.kind === 'social' ? 'Social' : 'Corporate'} · created {new Date(e.createdAt).toLocaleDateString()}</span>
+          <span className="muted small">
+            {workspace ? `${workspace} · ` : ''}{e.kind === 'social' ? 'Social' : 'Corporate'} · {e.startsAt
+              ? `starts ${new Date(e.startsAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`
+              : `created ${new Date(e.createdAt).toLocaleDateString()}`}
+          </span>
           <div className="row">{e.roles.map((r) => <span key={r} className="pill accent">{ROLE_LABEL[r]}</span>)}</div>
         </Link>
       )}
@@ -301,7 +367,10 @@ export const SCREENS: { group: string; items: Screen[] }[] = [
     { path: 'qa', title: 'Q&A + chat (iPhone)', roles: 'all', el: () => <Audience.QAChat /> },
     { path: 'guest', title: 'My event (iPhone)', roles: 'all', el: () => <Audience.GuestHome /> },
     { path: 'networking', title: 'Networking', roles: 'all', el: () => <Audience.Networking /> },
+    { path: 'video-room', title: 'Video room', roles: 'all', el: () => <Video.VideoRoom /> },
     { path: 'watch-party', title: 'Watch party', roles: 'all', el: () => <Audience.WatchParty /> },
+    { path: 'signup', title: 'Sign up', roles: 'all', el: () => <SignUp /> },
+    { path: 'surveys', title: 'Surveys', roles: 'all', el: () => <Surveys /> },
   ] },
   { group: 'Moderation', items: [
     { path: 'moderator', title: 'Moderator console', roles: ['moderator', 'producer'], el: () => <Ops.Moderator /> },
@@ -311,6 +380,8 @@ export const SCREENS: { group: string; items: Screen[] }[] = [
     { path: 'organizer', title: 'Organizer', roles: [], el: () => <Ops.Organizer /> },
     { path: 'team', title: 'Team & setup', roles: [], el: () => <Ops.Team /> },
     { path: 'attendee-types', title: 'Attendee types', roles: [], el: () => <Ops.AttendeeTypes /> },
+    { path: 'roster', title: 'Guest roster', roles: ['producer', 'foh'], el: () => <Roster /> },
+    { path: 'signup-settings', title: 'Sign-up form', roles: [], el: () => <SignUpSettings /> },
     { path: 'check-in', title: 'Check-in', roles: ['foh'], el: () => <Ops.CheckIn /> },
     { path: 'vendor', title: 'Orders & valet', roles: ['vendor', 'foh'], el: () => <Ops.VendorQueue /> },
   ] },

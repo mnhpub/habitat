@@ -1,15 +1,20 @@
 import {
   LIFECYCLE,
   type Actor,
+  type AttendeeType,
   type Breakout,
   type Command,
   type CommandType,
   type EventState,
+  type Guest,
   type Role,
+  type SignupQuestion,
+  type Survey,
   type TalentState,
 } from './types';
 import { CommandError, parseCommand } from './command';
 import { chatScope } from './chat';
+import { respondentKey } from './survey';
 import {
   CREW_ROLES,
   MAX_BREAKOUT_MESSAGES,
@@ -99,6 +104,22 @@ export const PERMISSIONS: Record<CommandType, Allowed> = {
   END_BREAKOUT: CREW_ROLES,
   BREAKOUT_CHAT: CREW_ROLES,
   SET_BREAKOUT_NOTES: CREW_ROLES,
+
+  CALL_JOIN: ANY,
+  CALL_LEAVE: ANY,
+
+  SET_SIGNUP_FORM: [],
+  SIGNUP: ANY,
+  SET_GUEST_WAITLIST: ['producer', 'foh'],
+  IMPORT_GUESTS: ['producer', 'foh'],
+
+  SURVEY_CREATE: MOD,
+  SURVEY_SET_STATUS: MOD,
+  SURVEY_DELETE: MOD,
+  SURVEY_RESPOND: ANY,
+
+  // Who may start a recording is checked in apply(): you must be in the session.
+  SET_SESSION_RECORDING: ANY,
 };
 
 /** Commands that act on the live production. Production roles must be on WARP to send them. */
@@ -561,6 +582,147 @@ export function apply(s: EventState, cmd: Command, actor: Actor, now: number): s
       b.notes = { text: text(cmd.text, 8000, 'Notes'), generatedAt: now, by: actor.email };
       return `Notes saved: ${b.name}`;
     }
+    // ---------------------------------------------------------------- video room
+    case 'CALL_JOIN': {
+      // One publication per person: joining again replaces the previous one.
+      s.call = s.call.filter((p) => p.email !== actor.email);
+      s.call.push({ email: actor.email, name: actor.name, sessionId: cmd.sessionId, tracks: [...cmd.tracks], joinedAt: now });
+      return `${actor.name} joined the video room`;
+    }
+    case 'CALL_LEAVE': {
+      if (!s.call.some((p) => p.email === actor.email)) throw new CommandError("You're not in the video room");
+      s.call = s.call.filter((p) => p.email !== actor.email);
+      return `${actor.name} left the video room`;
+    }
+    // ---------------------------------------------------------------- sign-up & guest roster
+    case 'SET_SIGNUP_FORM': {
+      const ids = new Set<string>();
+      const questions = cmd.questions.map((q) => {
+        if (ids.has(q.id)) throw new CommandError('Each sign-up question needs a unique id');
+        ids.add(q.id);
+        return { id: q.id, label: text(q.label, 200, 'Question'), required: !!q.required };
+      });
+      s.signup = { open: !!cmd.open, capacity: cmd.capacity, questions };
+      return `Sign-up ${cmd.open ? 'open' : 'closed'}${cmd.capacity ? ` · capacity ${cmd.capacity}` : ''}`;
+    }
+    case 'SIGNUP': {
+      const form = s.signup;
+      const answers = cleanAnswers(form.questions, cmd.answers);
+      const existing = s.guests.find((x) => x.email === actor.email);
+      if (existing) {
+        // Changing answers is allowed; a closed form only stops new sign-ups.
+        existing.answers = answers;
+        return `${existing.name} updated sign-up answers`;
+      }
+      if (!form.open) throw new CommandError('Sign-up is closed', 403);
+      const registered = s.guests.filter((x) => !x.waitlisted).length;
+      if (form.capacity !== null && registered >= form.capacity) {
+        const name = cmd.name?.trim() || actor.name;
+        s.guests.push({ id: newId('g', now), name, email: actor.email, type: typeFor(cmd.mode), mode: cmd.mode, checkedIn: false, waitlisted: true, answers });
+        return `${name} waitlisted (sign-up is full)`;
+      }
+      apply(s, { type: 'REGISTER', mode: cmd.mode, name: cmd.name }, actor, now);
+      const g = s.guests.find((x) => x.email === actor.email)!;
+      g.answers = answers;
+      return `${g.name} signed up · ${cmd.mode.replace('_', ' ')}`;
+    }
+    case 'SET_GUEST_WAITLIST': {
+      const g = find(s.guests, cmd.guestId, 'guest');
+      if (!cmd.waitlisted) {
+        if (!g.waitlisted) throw new CommandError(`${g.name} is already registered`);
+        const registered = s.guests.filter((x) => !x.waitlisted).length;
+        if (s.signup.capacity !== null && registered >= s.signup.capacity) throw new CommandError('Sign-up is at capacity', 409);
+        admit(s, g, now);
+        return `${g.name} approved from the waitlist`;
+      }
+      if (g.waitlisted) return `${g.name} is already waitlisted`;
+      throw new CommandError('Only waitlisted guests can be moved back to the waitlist. Use check-in for registered guests.');
+    }
+    case 'IMPORT_GUESTS': {
+      let added = 0;
+      let skipped = 0;
+      for (const row of cmd.rows) {
+        const email = row.email?.trim().toLowerCase() || undefined;
+        if (email && s.guests.some((x) => x.email === email)) { skipped++; continue; }
+        const name = text(row.name, 120, 'Name');
+        const g: Guest = { id: newId('g', now), name, email, type: typeFor(row.mode), mode: row.mode, checkedIn: false };
+        admit(s, g, now);
+        s.guests.push(g);
+        added++;
+      }
+      return `Imported ${added} guest${added === 1 ? '' : 's'}${skipped ? ` · ${skipped} already on the roster` : ''}`;
+    }
+
+    // ---------------------------------------------------------------- surveys
+    case 'SURVEY_CREATE': {
+      if (s.surveys.length >= MAX_SURVEYS) throw new CommandError('This event has reached its survey limit', 409);
+      const questions = cmd.questions.map((q): Survey['questions'][number] => {
+        const prompt = text(q.prompt, 300, 'Question');
+        if (q.kind === 'choice') {
+          const options = (q.options ?? []).map((o) => text(o, 80, 'Option'));
+          if (options.length < 2) throw new CommandError('Give each choice question 2 to 6 options');
+          return { id: newId('sq', now), prompt, kind: 'choice', options };
+        }
+        return { id: newId('sq', now), prompt, kind: q.kind, options: q.kind === 'rating' ? ['1', '2', '3', '4', '5'] : [] };
+      });
+      s.surveys.unshift({
+        id: newId('sv', now), title: text(cmd.title, 120, 'Title'), status: 'draft', anonymous: !!cmd.anonymous,
+        questions, responses: [], responded: [], createdBy: actor.email, createdAt: now,
+      });
+      return `Survey created: ${cmd.title}`;
+    }
+    case 'SURVEY_SET_STATUS': {
+      const sv = find(s.surveys, cmd.surveyId, 'survey');
+      if (cmd.status === 'open' && !sv.questions.length) throw new CommandError('Add questions before opening a survey');
+      sv.status = cmd.status;
+      return `Survey ${cmd.status}: ${sv.title}`;
+    }
+    case 'SURVEY_DELETE': {
+      const sv = find(s.surveys, cmd.surveyId, 'survey');
+      s.surveys = s.surveys.filter((x) => x.id !== sv.id);
+      return `Survey deleted: ${sv.title}`;
+    }
+    case 'SURVEY_RESPOND': {
+      const sv = find(s.surveys, cmd.surveyId, 'survey');
+      if (sv.status !== 'open') throw new CommandError('This survey is not open');
+      const key = respondentKey(s.id, actor.email);
+      if (sv.responded.includes(key)) throw new CommandError("You've already answered this survey", 409);
+      const answers: Record<string, number | string> = {};
+      sv.questions.forEach((q) => {
+        const v = cmd.answers[q.id];
+        if (q.kind === 'text') {
+          if (typeof v === 'string' && v.trim()) answers[q.id] = v.trim().slice(0, 1000);
+          return;
+        }
+        if (typeof v !== 'number' || !Number.isInteger(v)) throw new CommandError(`Answer "${q.prompt}"`);
+        if (q.kind === 'rating' && (v < 1 || v > 5)) throw new CommandError(`Rate "${q.prompt}" from 1 to 5`);
+        if (q.kind === 'choice' && (v < 0 || v >= q.options.length)) throw new CommandError(`Choose an option for "${q.prompt}"`);
+        answers[q.id] = v;
+      });
+      sv.responses.push({
+        id: newId('sr', now), by: sv.anonymous ? undefined : actor.email, byName: sv.anonymous ? undefined : actor.name, answers, ts: now,
+      });
+      sv.responded.push(key);
+      return `Survey answered: ${sv.title}`;
+    }
+
+    // ---------------------------------------------------------------- session recording
+    case 'SET_SESSION_RECORDING': {
+      const current = s.sessionRecordings[cmd.key];
+      if (cmd.recordingId) {
+        if (!s.call.some((p) => p.email === actor.email)) throw new CommandError('Join the video room before recording it', 403);
+        if (current) throw new CommandError('This session is already being recorded', 409);
+        s.sessionRecordings[cmd.key] = { recordingId: cmd.recordingId, by: actor.email, startedAt: now };
+        return 'Recording started · video room';
+      }
+      if (!current) throw new CommandError('Nothing is being recorded', 409);
+      if (current.by !== actor.email && !actor.roles.some((r) => ['organizer', 'producer', 'moderator'].includes(r))) {
+        throw new CommandError('Only the person who started this recording can stop it', 403);
+      }
+      delete s.sessionRecordings[cmd.key];
+      return 'Recording stopped · video room';
+    }
+
     default: {
       const never: never = cmd;
       throw new CommandError(`Unknown command ${(never as { type: string }).type}`);
@@ -597,6 +759,39 @@ function syncTalentOnAir(s: EventState) {
     if (onAir) t.state = 'live';
     else if (t.state === 'live') t.state = 'off';
   }
+}
+
+export const MAX_SURVEYS = 20;
+
+function typeFor(mode: Guest['mode']): AttendeeType {
+  return mode === 'in_person' ? 'in_person' : mode === 'online' ? 'virtual' : mode;
+}
+
+/** Let a registered guest in: in-person guests get a seat, everyone else is checked in. */
+function admit(s: EventState, g: Guest, now: number) {
+  g.waitlisted = false;
+  if (g.mode === 'in_person') {
+    if (!g.seat) {
+      const occupied = new Set(s.guests.map((x) => x.seat).filter(Boolean));
+      let seat = 1;
+      while (occupied.has(`R-${seat}`)) seat++;
+      g.seat = `R-${seat}`;
+    }
+  } else {
+    g.checkedIn = true;
+    g.checkedInAt = now;
+  }
+}
+
+/** Answers must cover every required question. Unknown keys are dropped. */
+function cleanAnswers(questions: SignupQuestion[], input: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const q of questions) {
+    const value = Object.hasOwn(input, q.id) && typeof input[q.id] === 'string' ? input[q.id].trim() : '';
+    if (q.required && !value) throw new CommandError(`${q.label} is required`);
+    if (value) out[q.id] = value.slice(0, 1000);
+  }
+  return out;
 }
 
 function label(s: EventState, id: string): string {

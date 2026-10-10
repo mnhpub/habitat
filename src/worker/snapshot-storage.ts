@@ -5,6 +5,17 @@ import { CommandError } from '../shared/command';
 const CHUNK_CHARACTERS = 128 * 1024;
 export const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
+/** Fill fields added after an event was saved, so older snapshots load without a schema migration. */
+export function hydrateState(state: EventState): EventState {
+  return {
+    ...state,
+    call: Array.isArray(state.call) ? state.call : [],
+    sessionRecordings: state.sessionRecordings ?? {},
+    signup: state.signup ?? { open: false, capacity: null, questions: [] },
+    surveys: Array.isArray(state.surveys) ? state.surveys : [],
+  };
+}
+
 export function snapshotChunks(state: EventState, maxBytes = MAX_SNAPSHOT_BYTES): string[] {
   const json = JSON.stringify(state);
   if (new TextEncoder().encode(json).byteLength > maxBytes) {

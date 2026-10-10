@@ -3,7 +3,7 @@ import type { Env } from './env';
 import { apply, authorize, CommandError, fireNextCue, WARP_COMMANDS } from '../shared/reducer';
 import { parseCommand } from '../shared/command';
 import { resolveActor } from './membership';
-import { MAX_SNAPSHOT_BYTES, snapshotChunks, writeSnapshot } from './snapshot-storage';
+import { hydrateState, MAX_SNAPSHOT_BYTES, snapshotChunks, writeSnapshot } from './snapshot-storage';
 import { seedEvent } from '../shared/seed';
 import { viewFor } from '../shared/view';
 import { canReadBreakoutRoom } from '../shared/breakout';
@@ -43,11 +43,11 @@ export class EventRoom extends Server<Env> {
       sql.exec('CREATE TABLE IF NOT EXISTS snapshot_chunks (part INTEGER PRIMARY KEY, json TEXT NOT NULL)');
       sql.exec('CREATE TABLE IF NOT EXISTS metadata_outbox (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL, name TEXT NOT NULL, venue TEXT NOT NULL)');
       const chunks = sql.exec<{ json: string }>('SELECT json FROM snapshot_chunks ORDER BY part').toArray();
-      if (chunks.length) this.state = JSON.parse(chunks.map(row => row.json).join('')) as EventState;
+      if (chunks.length) this.state = hydrateState(JSON.parse(chunks.map(row => row.json).join('')) as EventState);
       else {
         const legacy = sql.exec<{ json: string }>('SELECT json FROM snapshot WHERE id = 1').toArray()[0];
         if (legacy) {
-          const state = JSON.parse(legacy.json) as EventState;
+          const state = hydrateState(JSON.parse(legacy.json) as EventState);
           ctx.storage.transactionSync(() => {
             writeSnapshot(sql, snapshotChunks(state));
             sql.exec('DELETE FROM snapshot');
@@ -60,9 +60,9 @@ export class EventRoom extends Server<Env> {
 
   // ------------------------------------------------------------------ RPC (called by the Worker)
 
-  async init(id: string, name: string, kind: 'corporate' | 'social', createdBy: string, venue?: string): Promise<void> {
+  async init(id: string, name: string, kind: 'corporate' | 'social', createdBy: string, venue?: string, startsAt?: number): Promise<void> {
     if (this.state) return;
-    const state = seedEvent(id, name, kind, createdBy, Date.now());
+    const state = seedEvent(id, name, kind, createdBy, Date.now(), startsAt);
     if (venue !== undefined) state.venue = venue;
     const chunks = snapshotChunks(state);
     this.ctx.storage.transactionSync(() => writeSnapshot(this.ctx.storage.sql, chunks));
@@ -77,6 +77,14 @@ export class EventRoom extends Server<Env> {
 
   async snapshot(actor: Actor): Promise<ClientSnapshot> {
     return this.snapshotFor(this.require(), actor);
+  }
+
+  /**
+   * Email addresses on the guest roster who are registered (not waitlisted). The Worker calls this only
+   * after checking that the caller may send to this event's audience.
+   */
+  async rosterEmails(): Promise<string[]> {
+    return [...new Set(this.require().guests.filter((g) => g.email && !g.waitlisted).map((g) => g.email as string))];
   }
 
   /** Full breakout, including its transcript, for members and hosts. Used to write notes. */

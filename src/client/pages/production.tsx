@@ -4,6 +4,7 @@ import { api, useEvent, useTick } from '../store';
 import { clockTime, Empty, fmtCountdown, fmtTau, Gate, initials, Person, ROLE_LABEL, Switch, Tau } from '../lib';
 import type { Cue, EventView, JournalEntry, Role } from '../../shared/types';
 import { BRIDGE_ROLES } from '../../shared/types';
+import * as Video from './video';
 
 const srcLabel = (s: EventView, id: string) => s.sources.find((x) => x.id === id)?.label ?? id;
 
@@ -498,6 +499,7 @@ export function Bridge() {
           <div className="row"><h1>The bridge</h1><span className="pill ok"><span className="dot" />Always open · {crew.length} connected</span></div>
           <span className="muted">The always-open call for everyone working the event — the backstage counterpart to the lobby. People wait here, talk on channels, and get moved to green rooms or stages without new links.</span>
         </div>
+        <Video.VideoRoom />
         {BRIDGE_GROUPS.map((g) => {
           const people = crew.filter((x) => x.roles.some((r) => g.roles.includes(r)));
           return (
@@ -546,6 +548,7 @@ export function Bridge() {
             <Link className="btn sm" to="../stage-manager">Cue talent</Link>
             <Link className="btn sm" to="../bus">Offer stream to bus</Link>
             <Link className="btn sm" to="../networking">Side room</Link>
+            <Link className="btn sm" to="../breakouts">Breakouts</Link>
           </div>
         </div>
         <div className="panel">

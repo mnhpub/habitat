@@ -1,4 +1,5 @@
 import { LIFECYCLE, type Command, type CommandType } from './types';
+import { MAX_CALL_TRACKS, TRACK_NAME } from './call';
 
 export class CommandError extends Error {
   constructor(message: string, public status = 400) { super(message); }
@@ -13,6 +14,15 @@ const optional = (rule: Rule): Rule => (v) => v === undefined || rule(v);
 const id = str(128);
 const on = { on: bool };
 const money = num(0, Number.MAX_SAFE_INTEGER, true);
+const list = (min: number, max: number, rule: Rule): Rule => (v) => Array.isArray(v) && v.length >= min && v.length <= max && v.every(rule);
+const shape = (spec: Record<string, Rule>): Rule => (v) =>
+  !!v && typeof v === 'object' && !Array.isArray(v) && Object.entries(spec).every(([key, rule]) => rule((v as Record<string, unknown>)[key]));
+const email: Rule = (v) => typeof v === 'string' && v.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+const nullable = (rule: Rule): Rule => (v) => v === null || rule(v);
+const modes = ['in_person', 'online', 'on_demand'] as const;
+const answerValue: Rule = (v) => typeof v === 'string' ? v.length <= 1000 : typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 5;
+const answers: Rule = (v) => !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length <= 20
+  && Object.entries(v).every(([k, val]) => k.length <= 64 && answerValue(val));
 const fields = {
   SET_PREVIEW: { sourceId: id }, TAKE: {}, CUT_TO: { sourceId: id },
   SET_AUTO_DIRECTOR: on, SET_LAYOUT: { layout: oneOf(['speaker', 'two', 'panel', 'slides', 'wide', 'slate']) },
@@ -55,6 +65,28 @@ const fields = {
   CREATE_BREAKOUT: { name: str(80), topic: optional(str(200)), capacity: num(2, 8, true) },
   JOIN_BREAKOUT: { breakoutId: id }, LEAVE_BREAKOUT: {}, END_BREAKOUT: { breakoutId: id },
   BREAKOUT_CHAT: { text: str(500) }, SET_BREAKOUT_NOTES: { breakoutId: id, text: str(8000) },
+  CALL_JOIN: {
+    sessionId: id,
+    tracks: (v: unknown) => Array.isArray(v) && v.length > 0 && v.length <= MAX_CALL_TRACKS && v.every((t) => typeof t === 'string' && TRACK_NAME.test(t)),
+  },
+  CALL_LEAVE: {},
+  SET_SIGNUP_FORM: {
+    open: bool,
+    capacity: nullable(num(1, 10_000, true)),
+    questions: list(0, 20, shape({ id: id, label: str(200), required: bool })),
+  },
+  SIGNUP: { mode: oneOf(modes), name: optional(str(120)), answers: (v: unknown) => answers(v) && Object.values(v as object).every((x) => typeof x === 'string') },
+  SET_GUEST_WAITLIST: { guestId: id, waitlisted: bool },
+  IMPORT_GUESTS: { rows: list(1, 500, shape({ name: str(120), email: optional(email), mode: oneOf(modes) })) },
+  SURVEY_CREATE: {
+    title: str(120),
+    anonymous: bool,
+    questions: list(1, 20, shape({ prompt: str(300), kind: oneOf(['rating', 'choice', 'text']), options: list(0, 6, str(80)) })),
+  },
+  SURVEY_SET_STATUS: { surveyId: id, status: oneOf(['draft', 'open', 'closed']) },
+  SURVEY_DELETE: { surveyId: id },
+  SURVEY_RESPOND: { surveyId: id, answers },
+  SET_SESSION_RECORDING: { key: oneOf(['call']), recordingId: nullable(id) },
 } satisfies Record<CommandType, Record<string, Rule>>;
 
 /** Validate untrusted JSON and copy only the fields defined by the command contract. */

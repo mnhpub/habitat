@@ -1,6 +1,7 @@
 import type { Actor, EventState, EventView, PollView, QuestionView, Role } from './types';
 import { canReadChat } from './chat';
 import { canReadBreakoutRoom } from './breakout';
+import { surveyView } from './survey';
 
 const has = (a: Actor, ...roles: Role[]) => a.roles.includes('organizer') || roles.some((r) => a.roles.includes(r));
 
@@ -40,6 +41,9 @@ export function viewFor(s: EventState, a: Actor): EventView {
       };
     });
 
+  // Drafts are for the people building the survey; everyone else sees it once it opens.
+  const surveys = s.surveys.filter((sv) => moderator || sv.status !== 'draft').map((sv) => surveyView(sv, a, s.id));
+
   const chat = s.chat.filter((m) => canReadChat(s, a, m) && (!m.held || moderator || m.author === a.email));
 
   const guests = crew ? s.guests : s.guests.filter((g) => g.email === a.email);
@@ -57,6 +61,7 @@ export function viewFor(s: EventState, a: Actor): EventView {
     ...s,
     polls,
     questions,
+    surveys,
     chat,
     guests,
     orders,
